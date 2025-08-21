@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Simulador de Precio Óptimo (Último precio + demanda conocida)</title>
+  <!-- Librerías -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+  <style>
+    :root { --bg:#0b1220; --card:#121a2b; --muted:#a6b0cf; --acc:#4da3ff; --good:#29cc97; --bad:#ff6b6b; }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:#fff;font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif}
+    header{padding:24px 28px;border-bottom:1px solid #223}
+    h1{margin:0 0 6px 0;font-size:22px}
+    p.sub{margin:0;color:var(--muted);font-size:13px}
+    main{display:grid;grid-template-columns:360px 1fr;gap:18px;padding:18px}
+    .card{background:var(--card);border:1px solid #1d2740;border-radius:16px;box-shadow:0 1px 0 #0003}
+    .card .hd{padding:14px 16px;border-bottom:1px solid #1d2740;font-weight:600}
+    .card .bd{padding:14px 16px}
+    label{display:block;margin:10px 0 6px 0;font-size:12px;color:var(--muted)}
+    input[type="file"],select,input[type="number"],button{width:100%;padding:10px;border-radius:12px;border:1px solid #2a3558;background:#0e1628;color:#e7ecff}
+    input::file-selector-button{background:#18223a;color:#e7ecff;border:1px solid #2a3558;border-radius:10px;padding:8px 10px;margin-right:10px}
+    button{cursor:pointer}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .kps{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:10px}
+    .kp{background:#0e1628;border:1px solid #2a3558;border-radius:12px;padding:10px}
+    .kp .label{color:var(--muted);font-size:12px}
+    .kp .value{font-weight:700;font-size:18px;margin-top:4px}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{border-bottom:1px solid #223;padding:10px;text-align:center}
+    thead th{position:sticky;top:0;background:#101934}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;border:1px solid #2a3558;background:#0e1628}
+    .ok{color:var(--good)}.warn{color:#ffb020}.err{color:var(--bad)}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .muted{color:var(--muted)}
+    canvas{max-height:420px}
+    .inline{display:inline-block;margin-top:8px}
+  </style>
+</head>
+<body>
+<header>
+  <h1>Simulador de Precio Óptimo por Producto</h1>
+  <p class="sub">
+    Calcula <strong>p*</strong> por SKU con elasticidad estimada (log–log) y <strong>anclaje al último punto</strong> (p₀,q₀):
+    q(p) = q₀ · (p/p₀)<sup>β</sup>. Cambiar los controles recalcula automáticamente.
+  </p>
+</header>
+
+<main>
+  <!-- Panel izquierdo: controles -->
+  <section class="card">
+    <div class="hd">Datos y configuración</div>
+    <div class="bd">
+      <label>Archivo CSV (histórico de facturas)</label>
+      <input type="file" id="csvFile" accept=".csv" />
+      <label class="inline"><input type="checkbox" id="costZero" style="width:auto;margin-right:8px"> Si falta costo, usar 0</label>
+
+      <div class="grid" style="margin-top:10px">
+        <div>
+          <label>Rango alrededor del último precio (±%)</label>
+          <input type="number" id="pctBand" value="30" min="1" max="90" step="1" />
+        </div>
+        <div>
+          <label>Paso de precio (% del último)</label>
+          <input type="number" id="stepPct" value="1" min="0.1" step="0.1" />
+        </div>
+      </div>
+
+      <div class="grid" style="margin-top:10px">
+        <div>
+          <label>Método de óptimo</label>
+          <select id="optMethod">
+            <option value="grid" selected>Rejilla (respeta bandas)</option>
+            <option value="lerner">Fórmula Lerner (si |β|&gt;1)</option>
+          </select>
+        </div>
+        <div>
+          <label>Producto para graficar (por nombre)</label>
+          <select id="skuSelect"><option value="">—</option></select>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:12px">
+        <button id="btnRecalc" disabled>Recalcular</button>
+        <button id="btnDownload" disabled>Descargar resultados CSV</button>
+        <span class="muted" id="hint"></span>
+      </div>
+
+      <div class="kps">
+        <div class="kp"><div class="label">Registros leídos</div><div class="value" id="kRows">0</div></div>
+        <div class="kp"><div class="label">SKUs válidos</div><div class="value" id="kSkus">0</div></div>
+        <div class="kp"><div class="label">Cols mapeadas</div><div class="value" id="kCols">—</div></div>
+        <div class="kp"><div class="label">Método</div><div class="value" id="kMethod">grid</div></div>
+      </div>
+
+      <!-- Validador y mapeo -->
+      <div style="margin-top:12px">
+        <div style="font-weight:600;margin-bottom:6px">Validador y mapeo de columnas</div>
+        <div id="mapStatus" class="muted" style="margin:4px 0 8px 0">
+          Carga un CSV para validar. Campos mínimos: <code>product_id</code>, <code>price</code>, <code>quantity</code>. Opcionales: <code>cost</code>, <code>product_name</code>, <code>date</code>.
+        </div>
+        <div class="grid" id="mappingGrid" style="grid-template-columns:1fr 1fr">
+          <div>
+            <label>Product ID</label>
+            <select id="map_product_id"><option value="">— ninguno —</option></select>
+          </div>
+          <div>
+            <label>Price</label>
+            <select id="map_price"><option value="">— ninguno —</option></select>
+          </div>
+          <div>
+            <label>Quantity</label>
+            <select id="map_quantity"><option value="">— ninguno —</option></select>
+          </div>
+          <div>
+            <label>Cost</label>
+            <select id="map_cost"><option value="">— ninguno —</option></select>
+          </div>
+          <div>
+            <label>Product Name</label>
+            <select id="map_product_name"><option value="">— ninguno —</option></select>
+          </div>
+          <div>
+            <label>Date</label>
+            <select id="map_date"><option value="">— ninguno —</option></select>
+          </div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button id="btnApplyMapping" disabled>Aplicar mapeo</button>
+        </div>
+      </div>
+      <!-- /Validador -->
+    </div>
+  </section>
+
+  <!-- Panel derecho: resultados -->
+  <section class="card" style="display:flex;flex-direction:column">
+    <div class="hd">Curva de beneficio (Producto seleccionado)</div>
+    <div class="bd">
+      <canvas id="chartCanvas"></canvas>
+      <div id="chartMeta" class="muted" style="margin-top:8px"></div>
+      <div id="chartExplain" class="muted" style="margin-top:12px; line-height:1.5"></div>
+    </div>
+  </section>
+</main>
+
+<section class="card" style="margin:0 18px 18px 18px">
+  <div class="hd">Resumen por producto</div>
+  <div class="bd" style="overflow:auto;max-height:420px">
+    <table id="tbl"><thead><tr>
+      <th>Producto</th><th>Nombre</th><th>β (elasticidad)</th><th>|β|&gt;1</th>
+      <th>Último precio p₀</th><th>Última demanda q₀</th><th>Costo c</th>
+      <th>p* (método)</th><th>Margen máx. estimado</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+</section>
+
+<script>
+/* ================= Utilidades ================= */
+function replaceAllSimple(str, find, rep){ return String(str).split(find).join(rep); }
+function normalizeHeader(h){
+  let s = String(h || '').toLowerCase();
+  s = replaceAllSimple(s, ' ', ''); s = replaceAllSimple(s, '-', '');
+  s = replaceAllSimple(s, '_', ''); s = replaceAllSimple(s, '.', '');
+  return s;
+}
+function tryParseNumber(v){
+  if (v===null||v===undefined||v==='') return NaN;
+  if (typeof v === 'number') return v;
+  let s = String(v).trim();
+  s = replaceAllSimple(s, ' ', ''); s = replaceAllSimple(s, ',', '.');
+  const n = Number(s); return isFinite(n)? n : NaN;
+}
+function unifyDateSeps(str){
+  let t = String(str); t = replaceAllSimple(t, '/', '-'); t = replaceAllSimple(t, '.', '-'); return t;
+}
+function parseDateAny(s){
+  if (!s) return new Date(NaN);
+  if (s instanceof Date) return s;
+  const raw = String(s).trim(); if (!raw) return new Date(NaN);
+  const direct = new Date(raw); if (!isNaN(direct)) return direct;
+  const t = unifyDateSeps(raw); const parts = t.split('-');
+  if (parts.length >= 3){
+    const a = parts.map(x=>parseInt(x,10));
+    if (parts[0].length === 4){ return new Date(a[0], (a[1]||1)-1, a[2]||1); }
+    else { return new Date(a[2], (a[1]||1)-1, a[0]); }
+  }
+  return new Date(NaN);
+}
+function mapColumns(headers){
+  const Hn = headers.map(normalizeHeader);
+  function find(cands){
+    for (const c of cands){ const i = Hn.indexOf(c); if (i!==-1) return headers[i]; }
+    return null;
+  }
+  return {
+    product_id:   find(['productid','sku','idproducto','id','producto','codigo','itemid','idarticulo']),
+    product_name: find(['productname','nombreproducto','product','nombre','descripcion','itemname','descripcionproducto']),
+    price:        find(['unitprice','price','precio','preciounitario','punitario','preciofinal','preciofactura']),
+    cost:         find(['unitcost','cost','costo','costounitario','cogs','costoestandar']),
+    quantity:     find(['quantity','qty','cantidad','unidades','q','cant','cantidadvendida']),
+    date:         find(['date','fecha','fechatransaccion','fechaventa','fechadoc'])
+  };
+}
+
+/* ====== Validador y mapeo manual ====== */
+let RAW_ROWS = [];
+let HEADERS = [];
+function buildMappingUI(headers, cols){
+  HEADERS = headers.slice();
+  const opts = ['— ninguno —'].concat(headers);
+  function fill(id, val){
+    const el = document.getElementById(id); if (!el) return;
+    el.innerHTML = opts.map(h=>`<option value="${h==='— ninguno —'?'':h}">${h}</option>`).join('');
+    if (val && headers.includes(val)) el.value = val;
+    else el.value = (val==='__zero__'||val==='__row_index__')? '' : (val||'');
+  }
+  fill('map_product_id', cols.product_id);
+  fill('map_price', cols.price);
+  fill('map_quantity', cols.quantity);
+  fill('map_cost', (cols.cost && cols.cost!=='__zero__')? cols.cost : '');
+  fill('map_product_name', cols.product_name);
+  fill('map_date', (cols.date && cols.date!=='__row_index__')? cols.date : '');
+  updateMapStatus(cols);
+  const btn = document.getElementById('btnApplyMapping'); if (btn) btn.disabled = false;
+  ['map_product_id','map_price','map_quantity','map_cost','map_product_name','map_date'].forEach(id=>{
+    const el = document.getElementById(id); if (!el) return;
+    el.addEventListener('change', ()=>{
+      const c = getManualMappingFromUI(); updateMapStatus(c);
+    });
+  });
+}
+function getManualMappingFromUI(){
+  function get(id){ const v = (document.getElementById(id)?.value)||''; return v||null; }
+  const cols = {
+    product_id: get('map_product_id'),
+    price: get('map_price'),
+    quantity: get('map_quantity'),
+    cost: get('map_cost'),
+    product_name: get('map_product_name'),
+    date: get('map_date')
+  };
+  if (!cols.date) cols.date = '__row_index__';
+  return cols;
+}
+function updateMapStatus(cols){
+  const req = ['product_id','price','quantity'];
+  const missing = req.filter(k=> !cols[k]);
+  const el = document.getElementById('mapStatus'); if (!el) return;
+  if (missing.length===0){ el.innerHTML = '<span class="pill ok">OK</span> Campos mínimos detectados.'; }
+  else { el.innerHTML = '<span class="pill warn">Faltan</span> '+ missing.join(', ') + '. Selecciona los encabezados correctos o renómbralos.'; }
+}
+function buildDatasetFromRows(rows, cols){
+  const by = new Map();
+  for (const r of rows){
+    const pid = (r[cols.product_id]??'').toString();
+    if (!pid) continue;
+    if (!by.has(pid)) by.set(pid, []);
+    by.get(pid).push(r);
+  }
+  const items = [];
+  for (const [pid, list] of by){
+    const valid = list.filter(r=>{
+      const p = tryParseNumber(r[cols.price]);
+      const q = tryParseNumber(r[cols.quantity]);
+      return isFinite(p) && p>0 && isFinite(q) && q>=0;
+    });
+    if (!valid.length) continue;
+    if (cols.date === '__row_index__'){
+      valid.sort((a,b)=> (a.__row_index__|0) - (b.__row_index__|0));
+    } else {
+      valid.sort((a,b)=> parseDateAny(a[cols.date]) - parseDateAny(b[cols.date]));
+    }
+    const name = cols.product_name? valid[valid.length-1][cols.product_name] : '';
+    items.push({ product_id: pid, product_name: name, validRows: valid });
+  }
+  return { cols, items };
+}
+
+/* ================= Estimación / Render ================= */
+function linRegLogLog(rows, cPrice, cQty){
+  const xs=[], ys=[];
+  for (const r of rows){
+    const p = tryParseNumber(r[cPrice]);
+    const q = tryParseNumber(r[cQty]);
+    if (isFinite(p) && p>0 && isFinite(q) && q>0){ xs.push(Math.log(p)); ys.push(Math.log(q)); }
+  }
+  const n = xs.length; if (n<3) return {beta: NaN, r2: NaN};
+  const mx = xs.reduce((a,b)=>a+b,0)/n, my = ys.reduce((a,b)=>a+b,0)/n;
+  let num=0, den=0, sst=0, ssr=0;
+  for (let i=0;i<n;i++){ const dx = xs[i]-mx, dy = ys[i]-my; num+=dx*dy; den+=dx*dx; sst+=dy*dy; }
+  const beta = den===0? NaN : num/den; const a = my - beta*mx;
+  for (let i=0;i<n;i++){ const yhat = a + beta*xs[i]; ssr += (yhat - my)**2; }
+  const r2 = sst===0? 0 : ssr/sst; return {beta, r2};
+}
+function format(x, d=2){ return isFinite(x)? Number(x).toFixed(d) : '—'; }
+
+const $ = sel => document.querySelector(sel);
+function showHint(msg){ $('#hint').textContent = msg || ''; }
+function setDisabled(idOrEl, disabled){
+  const el = (typeof idOrEl === 'string') ? document.getElementById(idOrEl) : idOrEl;
+  if (!el) return;
+  el.disabled = !!disabled;
+  if (disabled) el.setAttribute('disabled',''); else el.removeAttribute('disabled');
+}
+
+/* ================= Estado ================= */
+let RESULTS = [];     // salida por SKU
+let DATASET = null;   // { cols, items[{product_id, product_name, validRows[]}] }
+let CHART;
+
+/* ================= Render ================= */
+function renderTable(){
+  const tb = $('#tbl tbody'); tb.innerHTML = '';
+  for (const r of RESULTS){
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${r.product_id}</td>
+      <td>${r.product_name||''}</td>
+      <td>${format(r.beta,2)}</td>
+      <td>${Math.abs(r.beta)>1 ? '<span class="pill ok">Sí</span>' : '<span class="pill warn">No</span>'}</td>
+      <td>${format(r.p0,2)}</td>
+      <td>${format(r.q0,2)}</td>
+      <td>${format(r.c,2)}</td>
+      <td>${format(r.p_star,2)} <span class="muted">(${r.method})</span></td>
+      <td>${format(r.profit_max,2)}</td>`;
+    tb.appendChild(tr);
+  }
+}
+function renderSkuOptions(){
+  const sel = $('#skuSelect'), prev = sel.value;
+  sel.innerHTML = '<option value="">—</option>' + RESULTS.map(r=>{
+    const key = (r.product_name && String(r.product_name).trim()) ? String(r.product_name) : String(r.product_id);
+    const label = (r.product_name && String(r.product_name).trim()) ? String(r.product_name) : String(r.product_id);
+    // Incluimos el ID al final para distinguir visualmente si hay duplicados de nombre
+    const shown = r.product_name ? `${label} — ${r.product_id}` : label;
+    return `<option value="${key}">${shown}</option>`;
+  }).join('');
+  if (prev && RESULTS.some(r=> (r.product_name||r.product_id) === prev)) sel.value = prev;
+}
+function renderChartFor(nameKey){
+  // Buscar por nombre (o por id si el nombre está vacío)
+  let r = RESULTS.find(x => (x.product_name || x.product_id) === nameKey) || RESULTS[0];
+  if (!r) { document.getElementById('chartExplain').innerHTML = ''; return; }
+  const ctx = document.getElementById('chartCanvas');
+
+  const linePoints = r.grid_prices.map((p,i)=>({x:p, y:r.grid_profits[i]}));
+  const dsProfit = { label:'Ganancia estimada', data: linePoints, borderWidth:2, pointRadius:0 };
+  const dsPoint  = { type:'scatter', label:'p*', data:[{x: r.p_star, y: r.profit_max}], pointRadius:5 };
+
+  if (CHART) CHART.destroy();
+  CHART = new Chart(ctx, {
+    type: 'line',
+    data: { datasets: [dsProfit, dsPoint] },
+    options: {
+      parsing: false,
+      animation:false,
+      responsive:true,
+      scales:{
+        x: { type:'linear', title:{display:true,text:'Precio simulado'} },
+        y: { title:{display:true,text:'Ganancia estimada'} }
+      },
+      plugins:{
+        legend:{display:true},
+        // Título con el NOMBRE del producto
+        title:{display:true,text:`Producto: ${r.product_name || r.product_id}`},
+        tooltip:{ callbacks:{ label: c => `(${format(c.parsed.x)}, ${format(c.parsed.y)})` } }
+      }
+    }
+  });
+  document.getElementById('chartMeta').innerHTML =
+    `β=${format(r.beta,2)} · método=<span class="pill">${r.method}</span> · p₀=${format(r.p0)} · q₀=${format(r.q0)} · c=${format(r.c)} · p*=${format(r.p_star)} · margen máx=${format(r.profit_max)}`;
+  updateExplanation(r);
+}
+function downloadCSV(){
+  if (!RESULTS.length) return;
+  const rows = [['product_id','product_name','beta','abs_beta_gt_1','p0','q0','c','p_star','method','profit_max']];
+  for (const r of RESULTS){
+    rows.push([r.product_id, r.product_name||'', r.beta, Math.abs(r.beta)>1, r.p0, r.q0, r.c, r.p_star, r.method, r.profit_max]);
+  }
+  const csv = rows.map(r=>r.join(',')).join('\n');
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'precio_optimo_resultados.csv'; a.click(); URL.revokeObjectURL(url);
+}
+
+/* ================= Descripción e interpretación (debajo de la gráfica) ================= */
+function updateExplanation(r){
+  if (!r) { document.getElementById('chartExplain').innerHTML=''; return; }
+  const pctBand   = Math.max(1, Math.min(90, Number(document.getElementById('pctBand').value)||30));
+  const stepPct   = Math.max(0.1, Number(document.getElementById('stepPct').value)||1);
+  const methodSel = document.getElementById('optMethod').value;
+
+  const p0 = r.p0, q0 = r.q0, c = r.c, beta = r.beta, r2 = r.r2;
+  const pMin = Math.max(0.01, p0*(1 - pctBand/100));
+  const pMax = p0*(1 + pctBand/100);
+  const stepAbs = p0*(stepPct/100);
+  const deltaPct = (isFinite(r.p_star) && p0>0) ? (r.p_star/p0 - 1)*100 : NaN;
+
+  let clas = '—';
+  if (isFinite(beta)){
+    if (beta >= 0) clas = 'signo inesperado';
+    else if (Math.abs(beta) < 1) clas = 'inelástica (|β|<1)';
+    else clas = 'elástica (|β|>1)';
+  }
+  const warnings = [];
+  if (isFinite(beta) && beta >= 0) warnings.push('⚠️ Elasticidad positiva: la demanda subiría con el precio; revisa datos/promos/stockouts.');
+  if (isFinite(r2) && r2 < 0.2) warnings.push('⚠️ R² bajo: la relación precio–demanda es débil; interpreta con cautela.');
+
+  const html = `
+    <h4 style="margin:8px 0 6px 0;font-size:14px;">Parámetros y valores calculados</h4>
+    <ul style="margin:0 0 8px 18px;">
+      <li><b>Precio actual p₀:</b> ${format(p0)}</li>
+      <li><b>Demanda observada q₀:</b> ${format(q0)}</li>
+      <li><b>Costo c:</b> ${format(c)}</li>
+      <li><b>Elasticidad β (log–log):</b> ${format(beta,2)} · <i>${clas}</i>${isFinite(r2)? ` · <span class=\"muted\">R²=${format(r2,2)}</span>`:''}</li>
+      <li><b>Óptimo p*:</b> ${format(r.p_star)} <span class=\"muted\">(${r.method})</span></li>
+      <li><b>Margen máximo estimado:</b> ${format(r.profit_max)}</li>
+      <li><b>Rango simulado:</b> [${format(pMin)}, ${format(pMax)}] cada ${format(stepAbs)} (±${format(pctBand,0)}% sobre p₀; paso ${format(stepPct,1)}%)</li>
+    </ul>
+    ${warnings.length? `<div style=\"margin:6px 0;\">${warnings.map(w=>`<div>${w}</div>`).join('')}</div>`:''}
+
+    <h4 style="margin:10px 0 6px 0;font-size:14px;">¿Cómo se construye la curva?</h4>
+    <p style="margin:0 0 6px 0;">
+      Para cada precio del rango, estimamos la <b>demanda</b> con <code>q(p) = q₀ · (p/p₀)<sup>β</sup></code> (anclada en el último punto).
+      Luego calculamos la <b>ganancia</b> como <code>(p - c) · q(p)</code>. La línea es esa ganancia estimada; el punto marca el <b>precio óptimo p*</b> que maximiza la ganancia dentro de las bandas.
+    </p>
+
+    <h4 style="margin:10px 0 6px 0;font-size:14px;">Lectura para no técnicos</h4>
+    <ul style="margin:0 0 8px 18px;">
+      <li><b>β (elasticidad):</b> indica cuánto cambia la cantidad si cambia el precio. <b>|β|&gt;1</b> → <b>elástica</b> (clientes muy sensibles); <b>|β|&lt;1</b> → <b>inelástica</b> (poca reacción).</li>
+      <li><b>p* vs p₀:</b> el óptimo está ${isFinite(deltaPct)? (deltaPct>=0? 'por encima':'por debajo'):'—'} de p₀ en <b>${isFinite(deltaPct)? format(Math.abs(deltaPct),2)+'%':'—'}</b>.
+          Moverse hacia p* suele <b>aumentar la ganancia total</b> según el modelo.</li>
+      <li><b>Si |β|≤1:</b> subir el precio reduce poco el volumen; el óptimo puede estar cerca del techo del rango. Si <b>|β|&gt;1</b>, pequeñas subidas bajan mucho el volumen y el óptimo tiende a ser más bajo.</li>
+      <li><b>Método:</b> “${methodSel}” ${methodSel==='lerner' ? 'usa la regla de Lerner (fórmula cerrada) y, si queda fuera de banda, se reoptimiza por rejilla.' : 'prueba todos los precios de la banda y elige el de mayor ganancia.'}</li>
+      <li><b>Importante:</b> asume mismas condiciones (promos, competencia, stock) que en la última fecha; cambios externos pueden desplazar la curva.</li>
+    </ul>
+  `;
+  document.getElementById('chartExplain').innerHTML = html;
+}
+
+/* ================= Cálculo ================= */
+function computeResultsFromDataset(){
+  if (!DATASET) return [];
+  const pctBand   = Math.max(1, Math.min(90, Number(document.getElementById('pctBand').value)||30));
+  const stepPct   = Math.max(0.1, Number(document.getElementById('stepPct').value)||1);
+  const methodSel = document.getElementById('optMethod').value;
+  document.getElementById('kMethod').textContent = methodSel;
+
+  const out = [];
+  for (const item of DATASET.items){
+    const valid = item.validRows;
+    if (valid.length < 3) continue;
+
+    const last = valid[valid.length-1];
+    const p0 = tryParseNumber(last[DATASET.cols.price]);
+    const q0 = tryParseNumber(last[DATASET.cols.quantity]);
+    const c  = (DATASET.cols.cost==='__zero__') ? 0 : tryParseNumber(last[DATASET.cols.cost]);
+
+    if (!(isFinite(p0)&&p0>0&&isFinite(q0)&&isFinite(c))) continue;
+
+    const {beta, r2} = linRegLogLog(valid, DATASET.cols.price, DATASET.cols.quantity);
+    const betaUse = isFinite(beta)? beta : -1.2;
+
+    function demandAt(p){ return q0 * Math.pow(p/p0, betaUse); }
+    function profitAt(p){ return (p - c) * Math.max(0, demandAt(p)); }
+
+    const eta  = Math.abs(betaUse);
+    const pMin = Math.max(0.01, p0*(1 - pctBand/100));
+    const pMax = p0*(1 + pctBand/100);
+
+    let p_star = NaN, method = 'grid', grid_prices=[], grid_profits=[], profit_max=NaN;
+
+    if (methodSel === 'lerner' && eta>1 && isFinite(c) && c>0){
+      p_star = c * (eta/(eta-1));
+      method = 'lerner';
+      if (p_star < pMin || p_star > pMax){ p_star = NaN; method = 'grid'; }
+    }
+
+    const stepAbs = p0*(stepPct/100);
+    for (let p = pMin; p <= pMax + 1e-9; p += stepAbs){
+      grid_prices.push(p);
+      grid_profits.push(profitAt(p));
+    }
+
+    if (!isFinite(p_star)){
+      let best = 0; for (let i=1;i<grid_profits.length;i++){ if (grid_profits[i] > grid_profits[best]) best = i; }
+      p_star = grid_prices[best]; profit_max = grid_profits[best];
+    } else {
+      profit_max = profitAt(p_star);
+    }
+
+    out.push({
+      product_id: item.product_id,
+      product_name: item.product_name,
+      beta: betaUse,
+      r2,
+      p0,q0,c,
+      p_star,
+      method,
+      profit_max,
+      grid_prices,
+      grid_profits
+    });
+  }
+  return out;
+}
+function recomputeAndRender(){
+  RESULTS = computeResultsFromDataset();
+  document.getElementById('kSkus').textContent = RESULTS.length;
+  setDisabled('btnDownload', RESULTS.length===0);
+  setDisabled('btnRecalc', !DATASET);
+  showHint(RESULTS.length? '' : (DATASET? 'No hay suficientes datos por SKU (mínimo 3 puntos válidos).' : 'Carga un CSV para empezar.'));
+  renderTable(); renderSkuOptions(); renderChartFor(document.getElementById('skuSelect').value);
+}
+
+/* ================= Eventos UI ================= */
+document.getElementById('btnDownload').addEventListener('click', downloadCSV);
+
+document.getElementById('btnRecalc').addEventListener('click', function(e){
+  e.preventDefault();
+  if (!DATASET){ showHint('Primero carga un CSV.'); return; }
+  showHint('Recalculando…');
+  try{ recomputeAndRender(); showHint('Listo'); }
+  catch(err){ console.error(err); showHint('Error al recalc: '+ err.message); }
+});
+
+document.getElementById('skuSelect').addEventListener('change', e=> renderChartFor(e.target.value));
+['change','input'].forEach(ev=>{
+  document.getElementById('pctBand').addEventListener(ev, recomputeAndRender);
+  document.getElementById('stepPct').addEventListener(ev, recomputeAndRender);
+});
+document.getElementById('optMethod').addEventListener('change', recomputeAndRender);
+
+/* ================= Carga CSV + Validador ================= */
+function parseCSV(file){
+  Papa.parse(file, {
+    header: true,
+    skipEmptyLines: 'greedy',
+    dynamicTyping: false,
+    complete: function(res){
+      const rows = res.data || [];
+      rows.forEach((r,i)=> r.__row_index__ = i);
+      afterRowsLoaded(rows);
+    },
+    error: function(err){ showHint('Error leyendo CSV: '+ (err && err.message? err.message: err)); }
+  });
+}
+function afterRowsLoaded(rows){
+  document.getElementById('kRows').textContent = rows.length;
+  RAW_ROWS = rows.slice();
+  if (!rows.length){ showHint('Archivo CSV sin filas.'); return; }
+  const headers = Object.keys(rows[0]||{}); HEADERS = headers.slice();
+  let cols = mapColumns(headers);
+  if (!cols.date) cols.date = '__row_index__';
+  const mapped = Object.values(cols).filter(Boolean).length;
+  document.getElementById('kCols').textContent = mapped + '/6';
+
+  // Construir UI de mapeo siempre
+  buildMappingUI(headers, cols);
+
+  // Validar mínimos
+  const missingMin = ['product_id','price','quantity'].filter(k=> !cols[k]);
+  if (missingMin.length){
+    showHint('Faltan columnas clave: '+ missingMin.join(', ')+'. Usa el mapeo para corregir.');
+    setDisabled('btnRecalc', true);
+    document.getElementById('btnDownload').disabled = true;
+    RESULTS = []; renderTable(); renderSkuOptions();
+    return; // esperar a que el usuario aplique mapeo
+  }
+
+  // Costo opcional
+  if (!cols.cost){
+    if (document.getElementById('costZero') && document.getElementById('costZero').checked){ cols.cost = '__zero__'; }
+    else { showHint('Falta columna de costo. Marca "Si falta costo, usar 0" o asígnala en el mapeo.'); setDisabled('btnRecalc', true); RESULTS=[]; renderTable(); renderSkuOptions(); return; }
+  }
+
+  // Construir dataset y recalcular
+  DATASET = buildDatasetFromRows(rows, cols);
+  window.DATASET = DATASET;
+  setDisabled('btnRecalc', false);
+  showHint('Archivo CSV cargado. SKUs: '+ DATASET.items.length);
+  recomputeAndRender();
+}
+
+// Aplicar mapeo manual
+(function(){
+  const btn = document.getElementById('btnApplyMapping');
+  if (!btn) return;
+  btn.addEventListener('click', function(){
+    if (!RAW_ROWS.length){ showHint('Carga un CSV primero.'); return; }
+    let cols = getManualMappingFromUI();
+    const missingMin = ['product_id','price','quantity'].filter(k=> !cols[k]);
+    if (missingMin.length){ showHint('Selecciona: '+missingMin.join(', ')); return; }
+    if (!cols.cost){ if (document.getElementById('costZero') && document.getElementById('costZero').checked) cols.cost='__zero__'; }
+    DATASET = buildDatasetFromRows(RAW_ROWS, cols);
+    document.getElementById('kCols').textContent = Object.values(cols).filter(Boolean).length + '/6';
+    setDisabled('btnRecalc', false);
+    showHint('Mapeo aplicado. SKUs: '+ DATASET.items.length);
+    recomputeAndRender();
+  });
+})();
+
+const fileInput = document.getElementById('csvFile');
+fileInput.addEventListener('change', function(e){
+  const file = e.target.files[0];
+  if (!file) return;
+  if (!/\.csv$/i.test(file.name)){ showHint('Solo CSV (.csv).'); return; }
+  showHint('Leyendo: ' + file.name);
+  parseCSV(file);
+});
+</script>
+</body>
+</html>
